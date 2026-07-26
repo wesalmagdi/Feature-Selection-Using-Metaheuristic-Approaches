@@ -1,0 +1,2 @@
+Algorithm,Accuracy,Precision,Recall,F1,ROC_AUC,Features,Runtime
+GA,1.0,1.0,1.0,1.0,1.0,9,49.33111906051636
