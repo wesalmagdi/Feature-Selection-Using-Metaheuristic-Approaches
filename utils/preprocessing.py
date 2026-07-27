@@ -1,160 +1,186 @@
-"""
-preprocessing.py
-----------------
-Reusable data-loading and preprocessing utilities shared across notebooks.
+from pathlib import Path
 
-Keeping this logic in one place guarantees that every optimizer
-(GA, PSO, GWO, WOA) and the baseline classifier train/test on
-*exactly* the same processed data, which is essential for a fair
-comparison.
-"""
-
-import os
 import numpy as np
 import pandas as pd
-from sklearn.datasets import load_breast_cancer
+
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+from utils.config import RAW_DATA_DIR, PROCESSED_DIR
 
 
-def load_dataset(source="breast_cancer", csv_path=None, target_column=None):
-    """
-    Load a medical dataset as a pandas DataFrame + target Series.
+def load_raw_dataset(dataset_name, raw_dir=RAW_DATA_DIR):
+    raw_dir = Path(raw_dir)
 
-    Parameters
-    ----------
-    source : str
-        "breast_cancer" -> uses sklearn's built-in Wisconsin Breast Cancer
-        dataset (good default, no download required, works offline on Kaggle).
-        "csv" -> loads a CSV file from `csv_path`, with `target_column` as
-        the label column. Use this to swap in any other medical dataset
-        (e.g. a Kaggle dataset added to the notebook's input directory).
+    if dataset_name == "breast":
+        path = raw_dir / "Breast Cancer Wisconsin Diagnostic Data Set.csv"
+        df = pd.read_csv(path)
 
-    Returns
-    -------
-    X : pd.DataFrame
-    y : pd.Series
-    """
-    if source == "breast_cancer":
-        data = load_breast_cancer(as_frame=True)
-        X = data.data.copy()
-        y = data.target.copy()
-        y.name = "target"
+        # Remove the identifier and the completely empty last column.
+        df = df.drop(columns=["id"], errors="ignore")
+        df = df.dropna(axis=1, how="all")
+
+        # Malignant is the medically important positive class.
+        y = df.pop("diagnosis").map({"B": 0, "M": 1})
+
+        if y.isna().any():
+            raise ValueError("Unexpected diagnosis label")
+
+        return df, y.astype(int)
+
+    if dataset_name == "heart":
+        path = raw_dir / "heart_disease_uci.csv"
+        df = pd.read_csv(path)
+
+        # Convert the 0–4 severity target into:
+        # 0 = no heart disease, 1 = heart disease present.
+        y = (df.pop("num") > 0).astype(int)
+
+        # id is only an identifier.
+        # dataset identifies the source hospital/cohort and may produce
+        # dataset-specific bias.
+        X = df.drop(columns=["id", "dataset"], errors="ignore")
+
         return X, y
 
-    elif source == "csv":
-        if csv_path is None or target_column is None:
-            raise ValueError("csv_path and target_column are required when source='csv'")
-        df = pd.read_csv(csv_path)
-        y = df[target_column]
-        X = df.drop(columns=[target_column])
-        return X, y
-
-    else:
-        raise ValueError(f"Unknown source: {source}")
+    raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
-def explore_dataset(X: pd.DataFrame, y: pd.Series):
-    """Print a quick data-quality / shape summary. Returns nothing, side-effect only."""
-    print("Shape:", X.shape)
-    print("\nClass balance:")
-    print(y.value_counts(normalize=True))
-    print("\nMissing values per column:")
-    missing = X.isnull().sum()
-    print(missing[missing > 0] if missing.sum() > 0 else "No missing values.")
-    print("\nDescribe:")
-    print(X.describe().T)
+def preprocess_and_split(dataset_name, random_state=42):
+    X, y = load_raw_dataset(dataset_name)
 
-
-def handle_missing_values(X: pd.DataFrame, strategy="median"):
-    """
-    Impute missing values column-wise.
-
-    strategy : "median" | "mean" | "most_frequent" | "drop"
-    """
-    X = X.copy()
-    if strategy == "drop":
-        return X.dropna()
-
-    for col in X.columns:
-        if X[col].isnull().any():
-            if strategy == "median":
-                fill_value = X[col].median()
-            elif strategy == "mean":
-                fill_value = X[col].mean()
-            elif strategy == "most_frequent":
-                fill_value = X[col].mode()[0]
-            else:
-                raise ValueError(f"Unknown strategy: {strategy}")
-            X[col] = X[col].fillna(fill_value)
-    return X
-
-
-def encode_labels(y: pd.Series):
-    """Encode target labels as integers 0..n_classes-1. Returns (y_encoded, encoder)."""
-    encoder = LabelEncoder()
-    y_encoded = encoder.fit_transform(y)
-    return y_encoded, encoder
-
-
-def scale_features(X_train, X_test):
-    """Standardize features (zero mean, unit variance) fit on train, applied to test."""
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    return X_train_scaled, X_test_scaled, scaler
-
-
-def preprocess_and_split(
-    X: pd.DataFrame,
-    y: pd.Series,
-    test_size=0.2,
-    random_state=42,
-    missing_strategy="median",
-):
-    """
-    Full pipeline: handle missing values -> encode labels -> split -> scale.
-
-    Returns
-    -------
-    X_train, X_test, y_train, y_test, feature_names, scaler, encoder
-    """
-    X_clean = handle_missing_values(X, strategy=missing_strategy)
-    y_encoded, encoder = encode_labels(y)
-
-    feature_names = list(X_clean.columns)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_clean.values,
-        y_encoded,
-        test_size=test_size,
+    # 60% train, 20% validation, 20% test.
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X,
+        y,
+        test_size=0.40,
         random_state=random_state,
-        stratify=y_encoded,
+        stratify=y,
     )
 
-    X_train, X_test, scaler = scale_features(X_train, X_test)
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp,
+        y_temp,
+        test_size=0.50,
+        random_state=random_state,
+        stratify=y_temp,
+    )
 
-    return X_train, X_test, y_train, y_test, feature_names, scaler, encoder
+    numeric_columns = (
+        X_train.select_dtypes(include=np.number).columns.tolist()
+    )
+    categorical_columns = [
+        column for column in X_train.columns
+        if column not in numeric_columns
+    ]
+
+    numeric_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+    ])
+
+    categorical_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        (
+            "onehot",
+            OneHotEncoder(
+                handle_unknown="ignore",
+                sparse_output=False,
+            ),
+        ),
+    ])
+
+    preprocessor = ColumnTransformer(
+        [
+            ("numeric", numeric_pipeline, numeric_columns),
+            (
+                "categorical",
+                categorical_pipeline,
+                categorical_columns,
+            ),
+        ],
+        verbose_feature_names_out=False,
+    )
+
+    # Fit only on training data.
+    X_train_processed = preprocessor.fit_transform(X_train)
+
+    # Validation and test only use transform.
+    X_val_processed = preprocessor.transform(X_val)
+    X_test_processed = preprocessor.transform(X_test)
+
+    feature_names = preprocessor.get_feature_names_out().tolist()
+
+    return (
+        X_train_processed,
+        X_val_processed,
+        X_test_processed,
+        y_train.to_numpy(),
+        y_val.to_numpy(),
+        y_test.to_numpy(),
+        feature_names,
+    )
 
 
-def save_processed_data(X_train, X_test, y_train, y_test, feature_names, out_dir="../datasets"):
-    """Save the processed train/test arrays + feature names to disk as .npy files."""
-    os.makedirs(out_dir, exist_ok=True)
-    np.save(os.path.join(out_dir, "X_train.npy"), X_train)
-    np.save(os.path.join(out_dir, "X_test.npy"), X_test)
-    np.save(os.path.join(out_dir, "y_train.npy"), y_train)
-    np.save(os.path.join(out_dir, "y_test.npy"), y_test)
-    with open(os.path.join(out_dir, "feature_names.txt"), "w") as f:
-        f.write("\n".join(feature_names))
-    print(f"Saved processed data to {out_dir}")
+def save_processed_data(
+    dataset_name,
+    arrays,
+    out_root=PROCESSED_DIR,
+):
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        feature_names,
+    ) = arrays
+
+    out_dir = Path(out_root) / dataset_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    values = {
+        "X_train": X_train,
+        "X_val": X_val,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_val": y_val,
+        "y_test": y_test,
+    }
+
+    for name, value in values.items():
+        np.save(out_dir / f"{name}.npy", value)
+
+    (out_dir / "feature_names.txt").write_text(
+        "\n".join(feature_names),
+        encoding="utf-8",
+    )
 
 
-def load_processed_data(in_dir="../datasets"):
-    """Load previously saved processed train/test arrays + feature names."""
-    X_train = np.load(os.path.join(in_dir, "X_train.npy"))
-    X_test = np.load(os.path.join(in_dir, "X_test.npy"))
-    y_train = np.load(os.path.join(in_dir, "y_train.npy"))
-    y_test = np.load(os.path.join(in_dir, "y_test.npy"))
-    with open(os.path.join(in_dir, "feature_names.txt")) as f:
-        feature_names = f.read().splitlines()
-    return X_train, X_test, y_train, y_test, feature_names
+def load_processed_data(
+    dataset_name,
+    in_root=PROCESSED_DIR,
+):
+    in_dir = Path(in_root) / dataset_name
+
+    arrays = [
+        np.load(in_dir / f"{name}.npy")
+        for name in [
+            "X_train",
+            "X_val",
+            "X_test",
+            "y_train",
+            "y_val",
+            "y_test",
+        ]
+    ]
+
+    feature_names = (
+        in_dir / "feature_names.txt"
+    ).read_text(encoding="utf-8").splitlines()
+
+    return (*arrays, feature_names)
