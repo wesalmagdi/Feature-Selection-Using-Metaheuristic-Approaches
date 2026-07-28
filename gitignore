@@ -1,0 +1,28 @@
+# Generated data / results
+datasets/*
+!datasets/.gitkeep
+results/*
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Env
+.venv/
+venv/
+env/
+.python-version
+
+# Jupyter
+*.ipynb_checkpoints
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
